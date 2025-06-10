@@ -111,5 +111,7 @@ def main():
 
     print(f"\n✅ Texto final salvo em: {destino_docx}")
 
+    # teste
+
 if __name__ == "__main__":
     main()
