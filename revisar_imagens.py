@@ -1,28 +1,12 @@
 import os
-import sys
 import time
 import re
+import threading
+from tkinter import Tk, Label, Button, filedialog, Text, ttk, messagebox
 from playwright.sync_api import sync_playwright
-from tkinter import Tk, filedialog
 from docx import Document
-from tqdm import tqdm
-
-# --- Constantes de Erros ---
-ERRO_GPT = "__ERRO_GPT__"
-ERRO_AUTENTICACAO = "__ERRO_AUTENTICACAO__"
-ARQUIVO_JA_ANEXADO = "__ARQUIVO_JA_ANEXADO__"
-ERRO_ENVIO = "__ERRO_ENVIO__"
-UPLOAD_DESABILITADO = "__UPLOAD_DESABILITADO__"
 
 # --- Funções Utilitárias ---
-def log(msg):
-    print(f"[LOG] {msg}")
-
-def selecionar_pasta():
-    root = Tk()
-    root.withdraw()
-    return filedialog.askdirectory(title="Selecione a pasta com arquivos PDF")
-
 def get_pdf_files(pasta):
     return [os.path.join(pasta, f) for f in os.listdir(pasta)
             if os.path.isfile(os.path.join(pasta, f)) and f.lower().endswith('.pdf')]
@@ -40,17 +24,15 @@ def salvar_texto_docx(respostas_dict, destino):
     doc.save(destino)
 
 def houve_erro_visual(page):
-    erro_elements = page.locator(".text-token-text-error")
-    if erro_elements.count() > 0:
-        mensagens = erro_elements.all_text_contents()
-        for msg in mensagens:
-            log(f"❌ Erro detectado: {msg}")
-        return True
+    # Verificação por classe CSS de erro no DOM
+    elementos = page.locator(".text-token-text-error")
+    if elementos.count() > 0:
+        for i in range(elementos.count()):
+            color = page.evaluate("(el) => getComputedStyle(el).color", elementos.nth(i))
+            if "rgb" in color or "var(--text-error)" in color:
+                print("🚫 Erro visual detectado: classe 'text-token-text-error' com cor de erro.")
+                return True
     return False
-
-def resposta_contem_erro(conteudo):
-    erros = ["aguarde", "tente novamente", "espera", "erro", "carregar mais tarde"]
-    return any(p in conteudo.lower() for p in erros)
 
 def chat_esta_gerando(page):
     return page.locator("button:has(svg[aria-label='Stop generating'])").is_visible()
@@ -58,40 +40,19 @@ def chat_esta_gerando(page):
 def ha_arquivo_anexado(page):
     return page.locator("div[role='listitem']").is_visible()
 
-def upload_esta_desabilitado(page):
-    try:
-        upload_element = page.locator("#upload-file")
-        if upload_element.count() == 0:
-            log("⚠️ Elemento #upload-file não encontrado na página.")
-            return False
-        if upload_element.is_disabled():
-            log("❌ O input de upload (#upload-file) está desabilitado. Cancelando envio.")
-            return True
-        return False
-    except Exception as e:
-        log(f"⚠️ Erro ao verificar estado do upload: {e}")
-        return True
-
 def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_estavel=4):
     conteudo_anterior = ""
     tentativas_estaveis = 0
     tempo_decorrido = 0
 
-    log("⏳ Aguardando resposta do GPT...")
-
     while tempo_decorrido < tempo_maximo:
         if page.url.endswith("/api/auth/error"):
-            log("⚠️ Erro de autenticação detectado.")
-            return ERRO_AUTENTICACAO
-
+            return "__ERRO_AUTENTICACAO__"
         if houve_erro_visual(page):
-            log("❌ Erro crítico detectado na interface. Encerrando o script.")
-            sys.exit(1)
-
+            return "__ERRO_GPT__"
         if chat_esta_gerando(page):
-            log("⌛ Ainda gerando resposta...")
-            time.sleep(1.5)
-            tempo_decorrido += 1.5
+            time.sleep(intervalo_check)
+            tempo_decorrido += intervalo_check
             continue
 
         elementos = page.locator(".markdown")
@@ -104,106 +65,108 @@ def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_esta
             tentativas_estaveis = 0
 
         if tentativas_estaveis >= tempo_estavel:
-            log("✅ Resposta estabilizada.")
-            if resposta_contem_erro(conteudo_atual):
-                log("⚠️ Erro no conteúdo detectado.")
-                return ERRO_GPT
-            return conteudo_atual
+            return conteudo_atual if conteudo_atual else "__ERRO_GPT__"
 
         conteudo_anterior = conteudo_atual
         time.sleep(intervalo_check)
         tempo_decorrido += intervalo_check
 
-    log("⚠️ Tempo máximo atingido.")
-    if resposta_contem_erro(conteudo_anterior):
-        log("⚠️ Erro na resposta final.")
-        return ERRO_GPT
-    return conteudo_anterior
+    return conteudo_anterior if conteudo_anterior else "__ERRO_GPT__"
 
 def enviar_pdf_para_gpt(page, caminho_pdf):
-    log(f"📎 Enviando PDF: {caminho_pdf}")
-
-    if upload_esta_desabilitado(page):
-        return UPLOAD_DESABILITADO
-
-    tentativas = 0
-    while ha_arquivo_anexado(page) and tentativas < 30:
-        log("⏳ Aguardando remoção do arquivo anterior...")
-        time.sleep(1.5)
-        tentativas += 1
-
     if ha_arquivo_anexado(page):
-        log("⚠️ Arquivo ainda anexado. Abortando.")
-        return ARQUIVO_JA_ANEXADO
+        return "__ARQUIVO_JA_ANEXADO__"
 
     try:
         page.click("button:has(svg[aria-label='Upload a file'])", timeout=5000)
-        page.wait_for_selector("input[type='file']", timeout=5000)
-    except Exception as e:
-        log(f"⚠️ Falha ao clicar no botão de upload: {e}")
-        if "Timeout 5000ms exceeded" in str(e):
-            log("❌ Timeout crítico ao clicar no botão de upload. Encerrando o script.")
-            sys.exit(1)
-        return ERRO_ENVIO
+        time.sleep(1)
+    except:
+        pass
 
-    if upload_esta_desabilitado(page):
-        return UPLOAD_DESABILITADO
-
-    try:
-        page.set_input_files("input[type='file']", caminho_pdf)
-    except Exception as e:
-        log(f"❌ Falha ao anexar o arquivo: {e}")
-        return ERRO_ENVIO
-
-    log("⌛ Aguardando reconhecimento do upload...")
+    page.set_input_files("input[type='file']", caminho_pdf)
     time.sleep(4)
+    page.keyboard.type("T2")
+    page.keyboard.press("Enter")
+    return esperar_resposta_gpt(page)
 
-    if upload_esta_desabilitado(page):
-        return UPLOAD_DESABILITADO
+# --- Interface Gráfica ---
+class App:
+    def __init__(self, master):
+        self.master = master
+        master.title("Automatizador de PDFs para ChatGPT")
 
-    log("🛑 Upload desabilitado. Comando 'T2' não será enviado.")
-    return UPLOAD_DESABILITADO
+        self.label = Label(master, text="Selecione a pasta com PDFs:")
+        self.label.pack(pady=5)
 
-def processar_arquivos(arquivos_pdf, page):
-    respostas = {}
-    for pdf in tqdm(arquivos_pdf, desc="📄 Processando PDFs", unit="arquivo"):
-        resposta = enviar_pdf_para_gpt(page, pdf)
-        nome = os.path.basename(pdf)
-        if resposta == UPLOAD_DESABILITADO:
-            respostas[nome] = "[ERRO] Campo de upload desabilitado na interface."
+        self.select_button = Button(master, text="Selecionar Pasta", command=self.selecionar_pasta)
+        self.select_button.pack(pady=5)
+
+        self.run_button = Button(master, text="Iniciar Processamento", command=self.iniciar_processamento)
+        self.run_button.pack(pady=10)
+
+        self.progress = ttk.Progressbar(master, orient="horizontal", length=300, mode="determinate")
+        self.progress.pack(pady=10)
+
+        self.log = Text(master, height=15, width=70)
+        self.log.pack(pady=10)
+
+        self.pasta = None
+
+    def selecionar_pasta(self):
+        self.pasta = filedialog.askdirectory()
+        if self.pasta:
+            self.log.insert("end", f"📁 Pasta selecionada: {self.pasta}\n")
         else:
-            respostas[nome] = resposta
-    return respostas
+            self.log.insert("end", "❌ Nenhuma pasta selecionada.\n")
 
-def main():
-    pasta = selecionar_pasta()
-    if not pasta:
-        log("Nenhuma pasta selecionada. Encerrando.")
-        return
+    def iniciar_processamento(self):
+        if not self.pasta:
+            messagebox.showwarning("Aviso", "Selecione uma pasta antes de continuar.")
+            return
+        threading.Thread(target=self.executar_processamento).start()
 
-    arquivos_pdf = get_pdf_files(pasta)
-    if not arquivos_pdf:
-        log("Nenhum PDF encontrado na pasta.")
-        return
+    def executar_processamento(self):
+        arquivos_pdf = get_pdf_files(self.pasta)
+        if not arquivos_pdf:
+            self.log.insert("end", "❌ Nenhum PDF encontrado na pasta.\n")
+            return
 
-    arquivos_pdf = sorted(arquivos_pdf, key=lambda x: extrair_indice_final(os.path.basename(x)))
+        arquivos_pdf = sorted(arquivos_pdf, key=lambda x: extrair_indice_final(os.path.basename(x)))
+        self.progress["maximum"] = len(arquivos_pdf)
+        respostas = {}
 
-    with sync_playwright() as p:
-        try:
+        self.log.insert("end", f"🚀 Iniciando envio de {len(arquivos_pdf)} arquivos...\n")
+
+        with sync_playwright() as p:
             browser = p.chromium.connect_over_cdp("http://localhost:9222")
-        except Exception as e:
-            log(f"❌ Falha ao conectar ao navegador: {e}")
-            sys.exit(1)
+            page = browser.contexts[0].pages[0]
 
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else context.new_page()
+            for idx, pdf in enumerate(arquivos_pdf):
+                nome = os.path.basename(pdf)
+                self.log.insert("end", f"📎 Processando: {nome}\n")
+                self.log.see("end")
 
-        respostas = processar_arquivos(arquivos_pdf, page)
+                try:
+                    resposta = enviar_pdf_para_gpt(page, pdf)
+                    if resposta.startswith("__ERRO"):
+                        self.log.insert("end", f"⚠️ Erro ao processar {nome}: {resposta}\n")
+                    else:
+                        self.log.insert("end", f"✅ {nome} processado com sucesso.\n")
+                    respostas[nome] = resposta
+                except Exception as e:
+                    self.log.insert("end", f"❌ Erro inesperado em {nome}: {e}\n")
+                    print(e)
+                    respostas[nome] = str(e)
 
-    destino_docx = os.path.join(pasta, "texto_corrigido_final.docx")
-    salvar_texto_docx(respostas, destino_docx)
-    log(f"✅ Texto final salvo em: {destino_docx}")
+                self.progress["value"] = idx + 1
 
+        destino_docx = os.path.join(self.pasta, "texto_corrigido_final.docx")
+        salvar_texto_docx(respostas, destino_docx)
+        self.log.insert("end", f"\n✅ Documento salvo em: {destino_docx}\n")
+        messagebox.showinfo("Concluído", f"Processamento finalizado. Arquivo salvo:\n{destino_docx}")
+
+# --- Execução ---
 if __name__ == "__main__":
-    main()
-
+    root = Tk()
+    app = App(root)
+    root.mainloop()
