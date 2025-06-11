@@ -78,16 +78,25 @@ def enviar_pdf_para_gpt(page, caminho_pdf):
         return "__ARQUIVO_JA_ANEXADO__"
 
     try:
-        page.click("button:has(svg[aria-label='Upload a file'])", timeout=5000)
-        time.sleep(1)
-    except:
-        pass
+        # Verifica se o botão de upload existe e está habilitado
+        botao_upload = page.locator("button:has(svg[aria-label='Upload a file'])")
+        if botao_upload.count() == 0:
+            print("⚠️ Botão de upload não encontrado no DOM.")
+            return "__BOTAO_UPLOAD_INEXISTENTE__"
+        if not botao_upload.is_enabled():
+            print("⚠️ Botão de upload está desabilitado no momento.")
+            return "__BOTAO_UPLOAD_DESABILITADO__"
 
-    page.set_input_files("input[type='file']", caminho_pdf)
-    time.sleep(4)
-    page.keyboard.type("T2")
-    page.keyboard.press("Enter")
-    return esperar_resposta_gpt(page)
+        # Define o arquivo diretamente no input file
+        page.set_input_files("input[type='file']", caminho_pdf)
+        time.sleep(4)
+        page.keyboard.type("T2")
+        page.keyboard.press("Enter")
+        return esperar_resposta_gpt(page)
+
+    except Exception as e:
+        print(f"⚠️ Erro inesperado ao enviar o arquivo '{os.path.basename(caminho_pdf)}': {e}")
+        return "__ERRO_ENVIO_DESCONHECIDO__"
 
 # --- Interface Gráfica ---
 class App:
