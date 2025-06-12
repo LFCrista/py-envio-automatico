@@ -3,7 +3,6 @@ import sys
 import os
 import time
 import tempfile
-import subprocess
 import streamlit as st
 from playwright.sync_api import sync_playwright
 from docx import Document
@@ -11,18 +10,10 @@ from docx import Document
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-# --- Configurações do Chrome Debug ---
-CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+# --- Configuração do Chrome Debug ---
 CHROME_USER_DATA_DIR = r"C:\temp\chrome"
 CHROME_REMOTE_DEBUGGING_PORT = 9222
 CHROME_DEBUG_URL = f"http://localhost:{CHROME_REMOTE_DEBUGGING_PORT}"
-
-def abrir_chrome_com_debug():
-    subprocess.Popen([
-        CHROME_PATH,
-        f"--remote-debugging-port={CHROME_REMOTE_DEBUGGING_PORT}",
-        f"--user-data-dir={CHROME_USER_DATA_DIR}"
-    ])
 
 # --- Funções reutilizadas ---
 def salvar_texto_docx(respostas_dict, destino):
@@ -48,7 +39,7 @@ def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_esta
             tempo_decorrido += intervalo_check
             continue
         elementos = page.locator(".markdown")
-        respostas = elementos.all_text_contents()
+        respostas = elementos.all_text'_contents()
         conteudo_atual = respostas[-1] if respostas else ""
         if conteudo_atual == conteudo_anterior:
             tentativas_estaveis += 1
@@ -63,7 +54,6 @@ def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_esta
 
 def enviar_pdf_para_gpt(page, caminho_pdf):
     # Aguarda até que nenhum arquivo esteja mais anexado
-    tentativas = 0
     tempo_maximo = 900  # 15 minutos
     intervalo = 1.5
     tempo_decorrido = 0
@@ -71,12 +61,10 @@ def enviar_pdf_para_gpt(page, caminho_pdf):
     while page.locator("div[role='listitem']").is_visible() and tempo_decorrido < tempo_maximo:
         time.sleep(intervalo)
         tempo_decorrido += intervalo
-        tentativas += 1
 
     if page.locator("div[role='listitem']").is_visible():
-        return "__ARQUIVO_JA_ANEXADO__"  # após esperar tempo máximo, se ainda estiver anexado, aborta
+        return "__ARQUIVO_JA_ANEXADO__"
 
-    # Faz o upload do arquivo
     try:
         if page.locator("input[type='file']").count() > 0:
             page.set_input_files("input[type='file']", caminho_pdf)
@@ -87,18 +75,13 @@ def enviar_pdf_para_gpt(page, caminho_pdf):
     except:
         return "__ERRO_ENVIO__"
 
-    time.sleep(4)  # espera o upload concluir
+    time.sleep(4)
     page.keyboard.type("T2")
     page.keyboard.press("Enter")
     return esperar_resposta_gpt(page)
 
-
 # --- Streamlit Interface ---
 st.title("Automatizador de PDFs para ChatGPT")
-
-if st.button("Abrir Chrome com Debug"):
-    abrir_chrome_com_debug()
-    st.success("Chrome iniciado com depuração remota (pode levar alguns segundos para estar ativo).")
 
 uploaded_files = st.file_uploader("Faça upload dos arquivos PDF", accept_multiple_files=True, type=["pdf"])
 
