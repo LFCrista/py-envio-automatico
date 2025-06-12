@@ -1,11 +1,21 @@
-import os
+import asyncio
 import sys
+import os
 import time
-import re
+import tempfile
+import subprocess
+import streamlit as st
 from playwright.sync_api import sync_playwright
-from tkinter import Tk, filedialog
 from docx import Document
-from tqdm import tqdm
+
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# --- Configurações do Chrome Debug ---
+CHROME_PATH = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+CHROME_USER_DATA_DIR = r"C:\temp\chrome"
+CHROME_REMOTE_DEBUGGING_PORT = 9222
+CHROME_DEBUG_URL = f"http://localhost:{CHROME_REMOTE_DEBUGGING_PORT}"
 
 # --- Constantes de Erros ---
 ERRO_GPT = "__ERRO_GPT__"
@@ -14,22 +24,13 @@ ARQUIVO_JA_ANEXADO = "__ARQUIVO_JA_ANEXADO__"
 ERRO_ENVIO = "__ERRO_ENVIO__"
 UPLOAD_DESABILITADO = "__UPLOAD_DESABILITADO__"
 
-# --- Funções Utilitárias ---
-def log(msg):
-    print(f"[LOG] {msg}")
-
-def selecionar_pasta():
-    root = Tk()
-    root.withdraw()
-    return filedialog.askdirectory(title="Selecione a pasta com arquivos PDF")
-
-def get_pdf_files(pasta):
-    return [os.path.join(pasta, f) for f in os.listdir(pasta)
-            if os.path.isfile(os.path.join(pasta, f)) and f.lower().endswith('.pdf')]
-
-def extrair_indice_final(nome_arquivo):
-    match = re.search(r'-(\d+)\.pdf$', nome_arquivo)
-    return int(match.group(1)) if match else 0
+# --- Funções ---
+def abrir_chrome_com_debug():
+    subprocess.Popen([
+        CHROME_PATH,
+        f"--remote-debugging-port={CHROME_REMOTE_DEBUGGING_PORT}",
+        f"--user-data-dir={CHROME_USER_DATA_DIR}"
+    ])
 
 def salvar_texto_docx(respostas_dict, destino):
     doc = Document()
@@ -44,32 +45,22 @@ def houve_erro_visual(page):
     if erro_elements.count() > 0:
         mensagens = erro_elements.all_text_contents()
         for msg in mensagens:
-            log(f"❌ Erro detectado: {msg}")
+            print(f"[ERRO VISUAL] {msg}")
         return True
     return False
 
-def resposta_contem_erro(conteudo):
-    erros = ["aguarde", "tente novamente", "espera", "erro", "carregar mais tarde"]
-    return any(p in conteudo.lower() for p in erros)
-
-def chat_esta_gerando(page):
-    return page.locator("button:has(svg[aria-label='Stop generating'])").is_visible()
-
-def ha_arquivo_anexado(page):
-    return page.locator("div[role='listitem']").is_visible()
-
 def upload_esta_desabilitado(page):
     try:
-        upload_element = page.locator("#upload-file")
+        upload_element = page.locator("input[type='file']")
         if upload_element.count() == 0:
-            log("⚠️ Elemento #upload-file não encontrado na página.")
+            print("[AVISO] Campo input[type='file'] não encontrado.")
             return False
         if upload_element.is_disabled():
-            log("❌ O input de upload (#upload-file) está desabilitado. Cancelando envio.")
+            print("[ERRO] Campo de upload está desabilitado.")
             return True
         return False
     except Exception as e:
-        log(f"⚠️ Erro ao verificar estado do upload: {e}")
+        print(f"[ERRO] Falha ao verificar estado do upload: {e}")
         return True
 
 def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_estavel=4):
@@ -77,21 +68,16 @@ def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_esta
     tentativas_estaveis = 0
     tempo_decorrido = 0
 
-    log("⏳ Aguardando resposta do GPT...")
-
     while tempo_decorrido < tempo_maximo:
         if page.url.endswith("/api/auth/error"):
-            log("⚠️ Erro de autenticação detectado.")
             return ERRO_AUTENTICACAO
 
         if houve_erro_visual(page):
-            log("❌ Erro crítico detectado na interface. Encerrando o script.")
-            sys.exit(1)
+            return ERRO_GPT
 
-        if chat_esta_gerando(page):
-            log("⌛ Ainda gerando resposta...")
-            time.sleep(1.5)
-            tempo_decorrido += 1.5
+        if page.locator("button:has(svg[aria-label='Stop generating'])").is_visible():
+            time.sleep(intervalo_check)
+            tempo_decorrido += intervalo_check
             continue
 
         elementos = page.locator(".markdown")
@@ -104,105 +90,95 @@ def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_esta
             tentativas_estaveis = 0
 
         if tentativas_estaveis >= tempo_estavel:
-            log("✅ Resposta estabilizada.")
-            if resposta_contem_erro(conteudo_atual):
-                log("⚠️ Erro no conteúdo detectado.")
-                return ERRO_GPT
-            return conteudo_atual
+            return conteudo_atual if conteudo_atual else ERRO_GPT
 
         conteudo_anterior = conteudo_atual
         time.sleep(intervalo_check)
         tempo_decorrido += intervalo_check
 
-    log("⚠️ Tempo máximo atingido.")
-    if resposta_contem_erro(conteudo_anterior):
-        log("⚠️ Erro na resposta final.")
-        return ERRO_GPT
-    return conteudo_anterior
+    return conteudo_anterior if conteudo_anterior else ERRO_GPT
 
 def enviar_pdf_para_gpt(page, caminho_pdf):
-    log(f"📎 Enviando PDF: {caminho_pdf}")
-
     if upload_esta_desabilitado(page):
         return UPLOAD_DESABILITADO
 
     tentativas = 0
-    while ha_arquivo_anexado(page) and tentativas < 30:
-        log("⏳ Aguardando remoção do arquivo anterior...")
+    while page.locator("div[role='listitem']").is_visible() and tentativas < 30:
         time.sleep(1.5)
         tentativas += 1
 
-    if ha_arquivo_anexado(page):
-        log("⚠️ Arquivo ainda anexado. Abortando.")
+    if page.locator("div[role='listitem']").is_visible():
         return ARQUIVO_JA_ANEXADO
 
     try:
-        page.click("button:has(svg[aria-label='Upload a file'])", timeout=5000)
-        page.wait_for_selector("input[type='file']", timeout=5000)
+        if page.locator("input[type='file']").count() > 0:
+            page.set_input_files("input[type='file']", caminho_pdf)
+        else:
+            return ERRO_ENVIO
     except Exception as e:
-        log(f"⚠️ Falha ao clicar no botão de upload: {e}")
-        if "Timeout 5000ms exceeded" in str(e):
-            log("❌ Timeout crítico ao clicar no botão de upload. Encerrando o script.")
-            sys.exit(1)
+        print(f"[ERRO] Falha ao anexar o arquivo: {e}")
         return ERRO_ENVIO
 
-    if upload_esta_desabilitado(page):
-        return UPLOAD_DESABILITADO
-
-    try:
-        page.set_input_files("input[type='file']", caminho_pdf)
-    except Exception as e:
-        log(f"❌ Falha ao anexar o arquivo: {e}")
-        return ERRO_ENVIO
-
-    log("⌛ Aguardando reconhecimento do upload...")
     time.sleep(4)
 
     if upload_esta_desabilitado(page):
         return UPLOAD_DESABILITADO
 
-    log("🛑 Upload desabilitado. Comando 'T2' não será enviado.")
-    return UPLOAD_DESABILITADO
+    page.keyboard.type("T2")
+    page.keyboard.press("Enter")
+    return esperar_resposta_gpt(page)
 
-def processar_arquivos(arquivos_pdf, page):
-    respostas = {}
-    for pdf in tqdm(arquivos_pdf, desc="📄 Processando PDFs", unit="arquivo"):
-        resposta = enviar_pdf_para_gpt(page, pdf)
-        nome = os.path.basename(pdf)
-        if resposta == UPLOAD_DESABILITADO:
-            respostas[nome] = "[ERRO] Campo de upload desabilitado na interface."
-        else:
-            respostas[nome] = resposta
-    return respostas
+# --- Streamlit Interface ---
+st.title("Automatizador de PDFs para ChatGPT")
 
-def main():
-    pasta = selecionar_pasta()
-    if not pasta:
-        log("Nenhuma pasta selecionada. Encerrando.")
-        return
+if st.button("Abrir Chrome com Debug"):
+    abrir_chrome_com_debug()
+    st.success("Chrome iniciado com depuração remota.")
 
-    arquivos_pdf = get_pdf_files(pasta)
-    if not arquivos_pdf:
-        log("Nenhum PDF encontrado na pasta.")
-        return
+uploaded_files = st.file_uploader("Envie os arquivos PDF", accept_multiple_files=True, type=["pdf"])
 
-    arquivos_pdf = sorted(arquivos_pdf, key=lambda x: extrair_indice_final(os.path.basename(x)))
+if st.button("Iniciar Processamento"):
+    if not uploaded_files:
+        st.warning("Envie pelo menos um arquivo PDF.")
+    else:
+        respostas = {}
+        progress_bar = st.progress(0)
+        log_area = st.empty()
+        log_text = ""
 
-    with sync_playwright() as p:
-        try:
-            browser = p.chromium.connect_over_cdp("http://localhost:9222")
-        except Exception as e:
-            log(f"❌ Falha ao conectar ao navegador: {e}")
-            sys.exit(1)
+        with sync_playwright() as p:
+            try:
+                browser = p.chromium.connect_over_cdp(CHROME_DEBUG_URL)
+                context = browser.contexts[0]
+                page = context.pages[0] if context.pages else context.new_page()
+            except Exception as e:
+                st.error(f"Erro ao conectar ao navegador Chrome com debug remoto: {e}")
+                st.stop()
 
-        context = browser.contexts[0]
-        page = context.pages[0] if context.pages else context.new_page()
+            for idx, uploaded_file in enumerate(uploaded_files):
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                    tmp.write(uploaded_file.getbuffer())
+                    tmp_path = tmp.name
 
-        respostas = processar_arquivos(arquivos_pdf, page)
+                log_text += f"Processando: {uploaded_file.name}\n"
+                log_area.text(log_text)
 
-    destino_docx = os.path.join(pasta, "texto_corrigido_final.docx")
-    salvar_texto_docx(respostas, destino_docx)
-    log(f"✅ Texto final salvo em: {destino_docx}")
+                resposta = enviar_pdf_para_gpt(page, tmp_path)
 
-if __name__ == "__main__":
-    main()
+                if resposta.startswith("__ERRO"):
+                    log_text += f"Erro ao processar {uploaded_file.name}: {resposta}\n"
+                else:
+                    log_text += f"{uploaded_file.name} processado com sucesso.\n"
+                log_area.text(log_text)
+
+                respostas[uploaded_file.name] = resposta
+                progress_bar.progress((idx + 1) / len(uploaded_files))
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp_docx:
+            salvar_texto_docx(respostas, tmp_docx.name)
+            st.success("Processamento finalizado. Baixe o resultado abaixo.")
+            st.download_button(
+                "Baixar arquivo .docx",
+                data=open(tmp_docx.name, "rb").read(),
+                file_name="texto_corrigido_final.docx"
+            )
