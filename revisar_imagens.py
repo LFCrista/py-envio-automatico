@@ -62,12 +62,21 @@ def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_esta
     return conteudo_anterior if conteudo_anterior else "__ERRO_GPT__"
 
 def enviar_pdf_para_gpt(page, caminho_pdf):
+    # Aguarda até que nenhum arquivo esteja mais anexado
     tentativas = 0
-    while page.locator("div[role='listitem']").is_visible() and tentativas < 30:
-        time.sleep(1.5)
+    tempo_maximo = 900  # 15 minutos
+    intervalo = 1.5
+    tempo_decorrido = 0
+
+    while page.locator("div[role='listitem']").is_visible() and tempo_decorrido < tempo_maximo:
+        time.sleep(intervalo)
+        tempo_decorrido += intervalo
         tentativas += 1
+
     if page.locator("div[role='listitem']").is_visible():
-        return "__ARQUIVO_JA_ANEXADO__"
+        return "__ARQUIVO_JA_ANEXADO__"  # após esperar tempo máximo, se ainda estiver anexado, aborta
+
+    # Faz o upload do arquivo
     try:
         if page.locator("input[type='file']").count() > 0:
             page.set_input_files("input[type='file']", caminho_pdf)
@@ -77,10 +86,12 @@ def enviar_pdf_para_gpt(page, caminho_pdf):
             page.set_input_files("input[type='file']", caminho_pdf)
     except:
         return "__ERRO_ENVIO__"
-    time.sleep(4)
+
+    time.sleep(4)  # espera o upload concluir
     page.keyboard.type("T2")
     page.keyboard.press("Enter")
     return esperar_resposta_gpt(page)
+
 
 # --- Streamlit Interface ---
 st.title("Automatizador de PDFs para ChatGPT")
