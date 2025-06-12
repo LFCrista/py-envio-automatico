@@ -39,7 +39,7 @@ def esperar_resposta_gpt(page, tempo_maximo=180, intervalo_check=1.5, tempo_esta
             tempo_decorrido += intervalo_check
             continue
         elementos = page.locator(".markdown")
-        respostas = elementos.all_text'_contents()
+        respostas = elementos.all_text_contents()
         conteudo_atual = respostas[-1] if respostas else ""
         if conteudo_atual == conteudo_anterior:
             tentativas_estaveis += 1
